@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <iostream>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -5,9 +6,11 @@
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/raw_ostream.h>
+#include <memory>
 
 #include "ConstantFolding.hpp"
 #include "Mem2Reg.hpp"
+#include "OptimizationPasses.hpp"
 #include "StaticCallCounter.hpp"
 #include "StaticCallCounterPrinter.hpp"
 
@@ -22,9 +25,41 @@ namespace Py = pybind11;
 #endif
 
 void
+addOptimizationPipeline(llvm::ModulePassManager& mpm)
+{
+  using namespace llvm;
+
+  mpm.addPass(Mem2Reg());
+  mpm.addPass(ConstantPropagation());
+
+  // Early scalar cleanup exposes common expressions and loop invariants.
+  mpm.addPass(ConstantFolding(errs()));
+  mpm.addPass(AlgebraicSimplification());
+  mpm.addPass(InstructionCombining());
+  mpm.addPass(StrengthReduction());
+  mpm.addPass(CommonSubexpressionElimination());
+
+  mpm.addPass(LoopInvariantCodeMotion());
+
+  // Hoisting and CSE create new folding and dead-code opportunities.
+  mpm.addPass(ConstantFolding(errs()));
+  mpm.addPass(AlgebraicSimplification());
+  mpm.addPass(InstructionCombining());
+  mpm.addPass(CommonSubexpressionElimination());
+  mpm.addPass(DeadCodeElimination());
+  mpm.addPass(ControlFlowSimplification());
+  mpm.addPass(AlgebraicSimplification());
+  mpm.addPass(DeadCodeElimination());
+}
+
+void
 opt(llvm::Module& mod)
 {
   using namespace llvm;
+
+#ifdef TASK4_LLM
+  std::unique_ptr<Py::scoped_interpreter> python;
+#endif
 
   // 定义分析pass的管理器
   LoopAnalysisManager lam;
@@ -46,46 +81,105 @@ opt(llvm::Module& mod)
 
 #ifdef TASK4_LLM
 
-  // 使用 LLM 技术来辅助编译优化
-  // 初始化 Python 解释器
-  Py::scoped_interpreter guard{};
-  // import sys 库，添加 TASK4_DIR 到寻找 Python 库的 path 中
-  Py::module_ sys = Py::module_::import("sys");
-  sys.attr("path").attr("append")(TASK4_DIR);
+  const char* apiKey = std::getenv("YATCC_LLM_API_KEY");
+  const char* baseURL = std::getenv("YATCC_LLM_BASE_URL");
+  if (!apiKey || !*apiKey || !baseURL || !*baseURL) {
+    llvm::errs() << "YATCC_LLM_API_KEY/YATCC_LLM_BASE_URL are not configured; "
+                    "using the deterministic optimization pipeline.\n";
+    addOptimizationPipeline(mpm);
+  } else {
+    try {
+      python = std::make_unique<Py::scoped_interpreter>();
+      Py::module_ sys = Py::module_::import("sys");
+      sys.attr("path").attr("append")(TASK4_DIR);
 
-  // 添加 LLM 加持的 Pass 到优化管理器中
-  mpm.addPass(PassSequencePredict(
-    "<api_key>",
-    "<base_url>",
-    {
-      { "StaticCallCounterPrinter",
-        TASK4_DIR "/StaticCallCounterPrinter.hpp",
-        TASK4_DIR "/StaticCallCounterPrinter.cpp",
-        "StaticCallCounterPrinter.xml",
-        [](llvm::ModulePassManager& mpm) {
-          mpm.addPass(StaticCallCounterPrinter(llvm::errs()));
-        } },
-      { "Mem2Reg",
-        TASK4_DIR "/Mem2Reg.hpp",
-        TASK4_DIR "/Mem2Reg.cpp",
-        "Mem2Reg.xml",
-        [](llvm::ModulePassManager& mpm) { mpm.addPass(Mem2Reg()); } },
-      { "ConstantFolding",
-        TASK4_DIR "/ConstantFolding.hpp",
-        TASK4_DIR "/ConstantFolding.cpp",
-        "ConstantFolding.xml",
-        [](llvm::ModulePassManager& mpm) {
-          mpm.addPass(ConstantFolding(llvm::errs()));
-        } },
-    }));
+      mpm.addPass(PassSequencePredict(
+        apiKey,
+        baseURL,
+        {
+          { "Mem2Reg",
+            TASK4_DIR "/Mem2Reg.hpp",
+            TASK4_DIR "/Mem2Reg.cpp",
+            "Mem2Reg.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(Mem2Reg());
+            } },
+          { "ConstantPropagation",
+            TASK4_DIR "/OptimizationPasses.hpp",
+            TASK4_DIR "/OptimizationPasses.cpp",
+            "ConstantPropagation.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(ConstantPropagation());
+            } },
+          { "ConstantFolding",
+            TASK4_DIR "/ConstantFolding.hpp",
+            TASK4_DIR "/ConstantFolding.cpp",
+            "ConstantFolding.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(ConstantFolding(llvm::errs()));
+            } },
+          { "AlgebraicSimplification",
+            TASK4_DIR "/OptimizationPasses.hpp",
+            TASK4_DIR "/OptimizationPasses.cpp",
+            "AlgebraicSimplification.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(AlgebraicSimplification());
+            } },
+          { "InstructionCombining",
+            TASK4_DIR "/OptimizationPasses.hpp",
+            TASK4_DIR "/OptimizationPasses.cpp",
+            "InstructionCombining.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(InstructionCombining());
+            } },
+          { "StrengthReduction",
+            TASK4_DIR "/OptimizationPasses.hpp",
+            TASK4_DIR "/OptimizationPasses.cpp",
+            "StrengthReduction.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(StrengthReduction());
+            } },
+          { "CommonSubexpressionElimination",
+            TASK4_DIR "/OptimizationPasses.hpp",
+            TASK4_DIR "/OptimizationPasses.cpp",
+            "CommonSubexpressionElimination.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(CommonSubexpressionElimination());
+            } },
+          { "LoopInvariantCodeMotion",
+            TASK4_DIR "/OptimizationPasses.hpp",
+            TASK4_DIR "/OptimizationPasses.cpp",
+            "LoopInvariantCodeMotion.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(LoopInvariantCodeMotion());
+            } },
+          { "DeadCodeElimination",
+            TASK4_DIR "/OptimizationPasses.hpp",
+            TASK4_DIR "/OptimizationPasses.cpp",
+            "DeadCodeElimination.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(DeadCodeElimination());
+            } },
+          { "ControlFlowSimplification",
+            TASK4_DIR "/OptimizationPasses.hpp",
+            TASK4_DIR "/OptimizationPasses.cpp",
+            "ControlFlowSimplification.xml",
+            [](llvm::ModulePassManager& passes) {
+              passes.addPass(ControlFlowSimplification());
+            } },
+        }));
+    } catch (const Py::error_already_set& error) {
+      llvm::errs() << "Unable to initialize the LLM optimizer; using the "
+                      "deterministic pipeline: "
+                   << error.what() << '\n';
+      addOptimizationPipeline(mpm);
+    }
+  }
 
 #else
 
-  // 传统 LLVM Pass 来进行编译优化
-  // 添加优化pass到管理器中
   mpm.addPass(StaticCallCounterPrinter(llvm::errs()));
-  mpm.addPass(Mem2Reg());
-  mpm.addPass(ConstantFolding(llvm::errs()));
+  addOptimizationPipeline(mpm);
 
 #endif
 

@@ -106,66 +106,83 @@ PassSequencePredict::PassSequencePredict(
 llvm::PreservedAnalyses
 PassSequencePredict::run(llvm::Module& mod, llvm::ModuleAnalysisManager& mam)
 {
-  // 生成 pass summary
-  std::string passSummary;
-  for (auto& passLocation : mPassesInfo) {
-    passSummary.append(pass_summary(passLocation));
+  auto addAllPasses = [this](llvm::ModulePassManager& mpm) {
+    for (auto& passInfo : mPassesInfo)
+      passInfo.mAddPass(mpm);
+  };
+
+  try {
+    // 生成 pass summary
+    std::string passSummary;
+    for (auto& passLocation : mPassesInfo) {
+      passSummary.append(pass_summary(passLocation));
+    }
+
+    // 将 LLVM::Module 转换为字符串，发送给大模型进行 IR 的分析
+    std::string module;
+    llvm::raw_string_ostream os(module);
+    mod.print(os, nullptr, false, true);
+    os.flush();
+
+    // 读取提示词
+    std::string systemPrompt =
+      read_file(TASK4_DIR "/llm/prompts/PassSeqPredSysPrTpl.xml");
+    auto userPrompt =
+      Py::str(read_file(TASK4_DIR "/llm/prompts/PassSeqPredUserPrTpl.xml"))
+        .attr("format")("ir"_a = module, "passes"_a = passSummary)
+        .cast<std::string>();
+
+    // 创建 LLM 会话
+    auto sessionID = mHelper.create_new_session();
+    mHelper.add_content(sessionID, Role::kSystem, systemPrompt);
+    mHelper.add_content(sessionID, Role::kUser, userPrompt);
+
+    // 处理大语言模型回复
+    Py::list handlers;
+    Py::module_ llm = Py::module_::import("llm");
+    handlers.append(llm.attr("remove_deepseek_r1_think"));
+    handlers.append(llm.attr("remove_md_block_marker")("xml"));
+    handlers.append(llm.attr("extract_text_from_xml")("sequence"));
+
+    std::string response = mHelper.chat(
+      sessionID,
+      "deepseek-r1",
+      handlers,
+      Py::dict("max_tokens"_a = 8192, "temperature"_a = 0, "stream"_a = false));
+
+    auto passSequence = Py::str(response).attr("split")(",").cast<Py::list>();
+
+    std::unordered_map<std::string,
+                       std::function<void(llvm::ModulePassManager&)>>
+      map;
+    for (auto& passInfo : mPassesInfo)
+      map[passInfo.mClassName] = passInfo.mAddPass;
+
+    llvm::ModulePassManager mpm;
+    bool addedPass = false;
+    for (auto& passClassName : passSequence) {
+      std::string name =
+        llvm::StringRef(passClassName.cast<std::string>()).trim().str();
+      auto found = map.find(name);
+      if (found == map.end()) {
+        llvm::errs() << "忽略未知 Pass：" << name << '\n';
+        continue;
+      }
+      found->second(mpm);
+      addedPass = true;
+    }
+    if (!addedPass)
+      addAllPasses(mpm);
+    mpm.run(mod, mam);
+
+    mHelper.delete_session(sessionID);
+  } catch (const Py::error_already_set& error) {
+    llvm::errs() << "LLM 优化失败，使用全部可用 Pass 回退：" << error.what()
+                 << '\n';
+    llvm::ModulePassManager fallback;
+    addAllPasses(fallback);
+    fallback.run(mod, mam);
   }
 
-  // 将 LLVM::Module 转换为字符串，发送给大模型进行 IR 的分析
-  std::string module;
-  llvm::raw_string_ostream os(module);
-  mod.print(os, nullptr, false, true);
-  os.flush();
-
-  // 读取提示词
-  std::string systemPrompt =
-    read_file(TASK4_DIR "/llm/prompts/PassSeqPredSysPrTpl.xml");
-  auto userPrompt =
-    Py::str(read_file(TASK4_DIR "/llm/prompts/PassSeqPredUserPrTpl.xml"))
-      .attr("format")("ir"_a = module, "passes"_a = passSummary)
-      .cast<std::string>();
-
-  // 创建 LLM 会话
-  auto sessionID = mHelper.create_new_session();
-  mHelper.add_content(sessionID, Role::kSystem, systemPrompt);
-  mHelper.add_content(sessionID, Role::kUser, userPrompt);
-
-  // 处理大语言模型回复
-  Py::list handlers;
-  Py::module_ llm = Py::module_::import("llm");
-  handlers.append(llm.attr("remove_deepseek_r1_think"));
-  handlers.append(llm.attr("remove_md_block_marker")("xml"));
-  // 提取 pass sequence
-  handlers.append(llm.attr("extract_text_from_xml")("sequence"));
-
-  // 发送会话
-  std::string response = mHelper.chat(
-    sessionID,
-    "deepseek-r1",
-    handlers,
-    Py::dict("max_tokens"_a = 8192, "temperature"_a = 0, "stream"_a = false));
-
-  // 将字符串形式的 pass sequence 转换为 Py::list
-  auto passSequence = Py::str(response).attr("split")(",").cast<Py::list>();
-
-  // 定义 pass 类名到 <向 ModulePassManager 添加其实例的函数> 的映射
-  std::unordered_map<std::string, std::function<void(llvm::ModulePassManager&)>>
-    map;
-  for (auto& passInfo : mPassesInfo) {
-    map[passInfo.mClassName] = passInfo.mAddPass;
-  }
-
-  // 向 mpm 中添加 pass
-  llvm::ModulePassManager mpm;
-  for (auto& passClassName : passSequence) {
-    map[passClassName.cast<std::string>()](mpm);
-  }
-  mpm.run(mod, mam);
-
-  // 删除会话
-  mHelper.delete_session(sessionID);
-
-  // 不需要保留任何分析结果
   return llvm::PreservedAnalyses::none();
 }

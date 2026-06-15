@@ -1,5 +1,7 @@
 #include "StaticCallCounter.hpp"
 
+#include <llvm/IR/Module.h>
+
 using namespace llvm;
 
 StaticCallCounter::Result
