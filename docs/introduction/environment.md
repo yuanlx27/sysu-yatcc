@@ -259,6 +259,36 @@ git clone git@github.com:arcsysu/YatCC.git
 从 WSL 打开 YatCC 仓库后，后续操作与
 [从 Windows 启动 Dev Containers](#start-dev-container-from-windows) 相同。
 
+### 从命令行启动 Dev Containers（适用于 Linux/WSL, MacOS）
+
+按照[官方文档](https://github.com/devcontainers/cli)自行选择偏好的方式安装 Dev Container CLI：
+
+- Arch Linux 及衍生发行版推荐安装 [AUR 包](https://aur.archlinux.org/packages/devcontainer-cli)；
+
+- MacOS 推荐安装 [Homebrew 包](https://formulae.brew.sh/formula/devcontainer)；
+
+- 其余情况推荐使用官方提供的命令 `curl -fsSL https://raw.githubusercontent.com/devcontainers/cli/main/scripts/install.sh | sh` 一键安装。
+
+在实验目录下执行：
+
+```shell
+devcontainer up
+```
+
+之后 Dev Container CLI 会自动拉取映像文件以及创建并启动容器。指令结束后可执行：
+
+```shell
+devcontainer exec bash
+```
+
+进入容器内的 Shell，之后可以在本地修改文件，并通过这个 Shell 在容器内运行构建命令，以 task0 为例，执行：
+
+```shell
+cmake -B build && cmake --build build --target task0-score
+```
+
+若评分为满分，则说明实验环境已正确配置。
+
 ### 注意事项
 
 1. 在配置 Dev
