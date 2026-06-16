@@ -20,3 +20,15 @@ cmake -B build && cmake --build build --target task0-score
 ```
 
 Full score means the environment is set up correctly.
+
+## Run Tests
+
+After finishing the code for a task, run its score target inside the Dev Container:
+
+```bash
+devcontainer exec bash
+rm -rf build && cmake -B build
+cmake --build build --target task<n>-score
+```
+
+Replace `<n>` with the real task number.
